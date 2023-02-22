@@ -2,15 +2,15 @@ package i18n
 
 import (
 	"fmt"
+	"golang.org/x/text/language"
+	"gopkg.in/yaml.v2"
 	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/gobuffalo/buffalo"
-	"github.com/nicksnyder/go-i18n/i18n"
-	"github.com/nicksnyder/go-i18n/i18n/language"
-	"github.com/nicksnyder/go-i18n/i18n/translation"
+	"github.com/nicksnyder/go-i18n/v2/i18n"
 )
 
 // LanguageExtractor can be implemented for custom finding of search
@@ -34,6 +34,8 @@ type Translator struct {
 	LanguageExtractors []LanguageExtractor
 	// LanguageExtractorOptions - a map with options to give to LanguageExtractors.
 	LanguageExtractorOptions LanguageExtractorOptions
+	// Bundle is the i18n.Bundle instance
+	Bundle *i18n.Bundle
 }
 
 // Load translations from the t.FS
@@ -56,7 +58,7 @@ func (t *Translator) Load() error {
 		dir := filepath.Dir(path)
 
 		// Add a prefix to the loaded string, to avoid collision with an ISO lang code
-		err = i18n.ParseTranslationFileBytes(fmt.Sprintf("%sbuff%s", dir, base), b)
+		_, err = t.Bundle.ParseMessageFileBytes(b, fmt.Sprintf("%sbuff%s", dir, base))
 		if err != nil {
 			return fmt.Errorf("unable to parse locale file %s: %v", base, err)
 		}
@@ -66,17 +68,24 @@ func (t *Translator) Load() error {
 
 // AddTranslation directly, without using a file. This is useful if you wish to load translations
 // from a database, instead of disk.
-func (t *Translator) AddTranslation(lang *language.Language, translations ...translation.Translation) {
-	i18n.AddTranslation(lang, translations...)
+func (t *Translator) AddTranslation(lang language.Tag, messages ...*i18n.Message) error {
+	return t.Bundle.AddMessages(lang, messages...)
 }
 
 // New Translator. Requires a fs.FS that points to the location
 // of the translation files, as well as a default language. This will
 // also call t.Load() and load the translations from disk.
-func New(fsys fs.FS, language string) (*Translator, error) {
+func New(fsys fs.FS, defaultLanguage string) (*Translator, error) {
+	defaultLanguageTag, err := language.Parse(defaultLanguage)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse default language %s: %v", defaultLanguage, err)
+	}
+	bundle := i18n.NewBundle(defaultLanguageTag)
+	bundle.RegisterUnmarshalFunc("yaml", yaml.Unmarshal)
+
 	t := &Translator{
 		FS:              fsys,
-		DefaultLanguage: language,
+		DefaultLanguage: defaultLanguage,
 		HelperName:      "t",
 		LanguageExtractorOptions: LanguageExtractorOptions{
 			"CookieName":    "lang",
@@ -88,6 +97,7 @@ func New(fsys fs.FS, language string) (*Translator, error) {
 			SessionLanguageExtractor,
 			HeaderLanguageExtractor,
 		},
+		Bundle: bundle,
 	}
 	return t, t.Load()
 }
@@ -122,21 +132,39 @@ func (t *Translator) Middleware() buffalo.MiddlewareFunc {
 			// set translator
 			if T := c.Value("T"); T == nil {
 				langs := c.Value("languages").([]string)
-				T, err := i18n.Tfunc(langs[0], langs[1:]...)
-				if err != nil {
-					c.Logger().Warn(err)
-					c.Logger().Warn("Your locale files are probably empty or missing")
-				}
-				c.Set("T", T)
+				localizer := i18n.NewLocalizer(t.Bundle, langs...)
+				c.Set("T", localizer)
 			}
 
 			// set up the helper function for the views:
-			c.Set(t.HelperName, func(s string, i ...interface{}) string {
+			c.Set(t.HelperName, func(s string, i ...interface{}) (string, error) {
 				return t.Translate(c, s, i...)
 			})
 			return next(c)
 		}
 	}
+}
+
+func (t *Translator) translate(localizer *i18n.Localizer, translationID string, args []interface{}) (string, error) {
+	var pluralCount interface{}
+	var templateData interface{}
+	if len(args) > 0 {
+		switch value := args[0].(type) {
+		case int, int8, int16, int32, int64, float32, float64:
+			pluralCount = value
+			if len(args) > 1 {
+				templateData = args[1]
+			}
+		default:
+			templateData = args[0]
+		}
+	}
+	config := i18n.LocalizeConfig{
+		MessageID:    translationID,
+		TemplateData: templateData,
+		PluralCount:  pluralCount,
+	}
+	return localizer.Localize(&config)
 }
 
 // Translate returns the translation of the string identified by translationID.
@@ -158,26 +186,25 @@ func (t *Translator) Middleware() buffalo.MiddlewareFunc {
 // data must be a struct{} or map[string]interface{} that contains a Count field and the template data,
 // Count field must be an integer type (int, int8, int16, int32, int64)
 // or a float formatted as a string (e.g. "123.45").
-func (t *Translator) Translate(c buffalo.Context, translationID string, args ...interface{}) string {
-	T := c.Value("T").(i18n.TranslateFunc)
-	return T(translationID, args...)
+func (t *Translator) Translate(c buffalo.Context, translationID string, args ...interface{}) (string, error) {
+	return t.translate(c.Value("T").(*i18n.Localizer), translationID, args)
 }
 
 // TranslateWithLang returns the translation of the string identified by translationID, for the given language.
 // See Translate for further details.
 func (t *Translator) TranslateWithLang(lang, translationID string, args ...interface{}) (string, error) {
-	T, err := i18n.Tfunc(lang)
-	if err != nil {
-		return "", err
-	}
-	return T(translationID, args...), nil
+	return t.translate(i18n.NewLocalizer(t.Bundle, lang), translationID, args)
 }
 
 // AvailableLanguages gets the list of languages provided by the app.
 func (t *Translator) AvailableLanguages() []string {
-	lt := i18n.LanguageTags()
-	sort.Strings(lt)
-	return lt
+	tags := t.Bundle.LanguageTags()
+	languages := make([]string, len(tags))
+	for i, tag := range tags {
+		languages[i] = tag.String()
+	}
+	sort.Strings(languages)
+	return languages
 }
 
 // Refresh updates the context, reloading translation functions.
@@ -190,18 +217,14 @@ func (t *Translator) Refresh(c buffalo.Context, newLang string) {
 	// Refresh languages
 	c.Set("languages", langs)
 
-	T, err := i18n.Tfunc(langs[0], langs[1:]...)
-	if err != nil {
-		c.Logger().Warn(err)
-		c.Logger().Warn("Your locale files are probably empty or missing")
-	}
+	localizer := i18n.NewLocalizer(t.Bundle, langs...)
 
 	// Refresh translation engine
-	c.Set("T", T)
+	c.Set("T", localizer)
 }
 
 func (t *Translator) extractLanguage(c buffalo.Context) []string {
-	langs := []string{}
+	var langs []string
 	for _, extractor := range t.LanguageExtractors {
 		langs = append(langs, extractor(t.LanguageExtractorOptions, c)...)
 	}

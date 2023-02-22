@@ -60,14 +60,22 @@ func app() *buffalo.App {
 	})
 	app.GET("/refresh", func(c buffalo.Context) error {
 		// This flash will be displayed in english
-		c.Flash().Add("success", t.Translate(c, "refresh-success"))
+		message, err := t.Translate(c, "refresh-success")
+		if err != nil {
+			return err
+		}
+		c.Flash().Add("success", message)
 
 		// Change lang to fr-fr
 		c.Cookies().Set("lang", "fr-fr", time.Minute)
 		t.Refresh(c, "fr-fr")
 
 		// This flash will be displayed in french
-		c.Flash().Add("success", t.Translate(c, "refresh-success"))
+		message, err = t.Translate(c, "refresh-success")
+		if err != nil {
+			return err
+		}
+		c.Flash().Add("success", message)
 		return c.Render(200, r.HTML("refresh.html"))
 	})
 	// Disable i18n middleware
@@ -125,7 +133,8 @@ func Test_i18n_format(t *testing.T) {
 
 	w := httptest.New(app())
 	res := w.HTML("/format").Get()
-	r.True(eq("Hello Mark!\n\n\t* Mr. Mark Bates\n\n\t* Mr. Chuck Berry\n", res.Body.String()))
+	got := res.Body.String()
+	r.True(eq("Hello Mark!\n\n\t* Mr. Mark Bates\n\n\t* Mr. Chuck Berry\n", got))
 }
 
 func Test_i18n_format_fr(t *testing.T) {
@@ -179,7 +188,7 @@ func Test_i18n_availableLanguages(t *testing.T) {
 
 	w := httptest.New(app())
 	res := w.HTML("/languages-list").Get()
-	r.Equal("[\"en-us\",\"fr-fr\"]", strings.TrimSpace(res.Body.String()))
+	r.Equal("[\"en-US\",\"fr-FR\"]", strings.TrimSpace(res.Body.String()))
 }
 
 func Test_i18n_URL_prefix(t *testing.T) {
@@ -199,7 +208,10 @@ func Test_i18n_TranslateWithLang(t *testing.T) {
 	r := require.New(t)
 
 	_ = httptest.New(app())
-	transl := i18n.Translator{}
+	transl, err := i18n.New(os.DirFS("locales"), "en-US")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Test English
 	lang := "en"

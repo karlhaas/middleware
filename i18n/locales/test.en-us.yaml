@@ -4,7 +4,7 @@
 - id: greeting-plural
   translation:
     one: "Hello, alone!"
-    other: "Hello, {{.Count}} people!"
+    other: "Hello, {{.PluralCount}} people!"
 
 - id: test-format
   translation: "Hello {{.Name}}!"
