@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gobuffalo/buffalo"
 	"github.com/nicksnyder/go-i18n/v2/i18n"
@@ -36,11 +37,13 @@ type Translator struct {
 	LanguageExtractorOptions LanguageExtractorOptions
 	// Bundle is the i18n.Bundle instance
 	Bundle *i18n.Bundle
+	// The time the message files have been loaded
+	loadingTime time.Time
 }
 
 // Load translations from the t.FS
 func (t *Translator) Load() error {
-	return fs.WalkDir(t.FS, ".", func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(t.FS, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -64,6 +67,11 @@ func (t *Translator) Load() error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	t.loadingTime = time.Now().UTC()
+	return nil
 }
 
 // AddTranslation directly, without using a file. This is useful if you wish to load translations
@@ -115,9 +123,8 @@ func New(fsys fs.FS, defaultLanguage string) (*Translator, error) {
 func (t *Translator) Middleware() buffalo.MiddlewareFunc {
 	return func(next buffalo.Handler) buffalo.Handler {
 		return func(c buffalo.Context) error {
-
-			// in development reload the translations
-			if c.Value("env").(string) == "development" {
+			// in development reload the translations if a file has changed
+			if t.needsReload(c) {
 				err := t.Load()
 				if err != nil {
 					return err
@@ -165,6 +172,38 @@ func (t *Translator) translate(localizer *i18n.Localizer, translationID string, 
 		PluralCount:  pluralCount,
 	}
 	return localizer.Localize(&config)
+}
+
+func (t *Translator) needsReload(c buffalo.Context) bool {
+	if c.Value("env").(string) != "development" {
+		return false
+	}
+	nilTime := time.Time{}
+	if nilTime == t.loadingTime {
+		return true
+	}
+	result := false
+	err := fs.WalkDir(t.FS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(t.loadingTime) {
+			c.Logger().Info("i18n middleware: Reloading translations because %s has changed", d.Name())
+			result = true
+		}
+		return nil
+	})
+	if err != nil {
+		c.Logger().Errorf("i18n middleware: Error in needsReload: %s", err)
+	}
+	return result
 }
 
 // Translate returns the translation of the string identified by translationID.
