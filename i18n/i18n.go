@@ -195,7 +195,7 @@ func (t *Translator) needsReload(c buffalo.Context) bool {
 			return err
 		}
 		if info.ModTime().After(t.loadingTime) {
-			c.Logger().Info("i18n middleware: Reloading translations because %s has changed", d.Name())
+			c.Logger().Infof("i18n middleware: Reloading translations because %s has changed", d.Name())
 			result = true
 		}
 		return nil
